@@ -1,0 +1,315 @@
+import numpy as np
+import matplotlib.pylab as plt
+
+#--------------------------------------------------------------------------------------------------------------------------------
+#Use firn model from Arthern et al. for Greenland, Allison et al. for South Pole, 
+#Kovacs et al. for conversion from density to index
+
+#first define a few functions that will be useful.
+def getDensity(thisDepth): #get density at a certain depth in feet
+    thisDepth=thisDepth*0.3048 #convert feet to meters
+    if southPoleFlag==0: #in Greenland
+        if thisDepth <= 14.89:
+            density=0.917-0.637*np.exp(-thisDepth/27)
+        else:
+            density=0.917-0.367*np.exp(-(thisDepth-14.89)/42)
+    #n(z)=1.78-0.43e^(13.2z) z in km
+    if southPoleFlag==1: #at South Pole
+        nofz=1.78-0.43*np.exp(-thisDepth*0.0132)
+        density=(nofz-1)/0.845
+    else: #try weird stuff in the model
+        if thisDepth <= 14.89:
+            density=0.917-0.637*np.exp(-thisDepth/27)
+        else:
+            density=0.917-0.367*np.exp(-(thisDepth-14.89)/75)
+    return density
+
+def getIndex(thisDensity): #get index of refraction given some density
+    ePrime=(1+0.845*thisDensity)**2
+    index=np.sqrt(ePrime)        
+    return index
+
+def refractRay(index1,index2,theta1): #do refraction across some boundary
+    if (np.sin(theta1)*index1/index2 > 1):
+        theta2=theta1
+    else:
+        theta2=np.arcsin(np.sin(theta1)*index1/index2)
+    return theta2
+def propagateRay(thisInitialAngle, thisDepthRx, thisDepthTx, thisStepSize, thisNumSteps, whichSol):
+    timeOfFlight=0
+    totalPath=0
+    angle1=thisInitialAngle*np.pi/180 #defined from zenith down, valid to 90 degrees
+    locationOfRayEnd=(0,-1*thisDepthRx) #start at the antenna down the hole
+    rayCoordH=[] # x coordinates of path
+    rayCoordV=[] # y coordinates of path
+    rayCoordH.append(locationOfRayEnd[0]*0.3048) # in m
+    rayCoordV.append(locationOfRayEnd[1]*0.3048) # in m
+    count = 0
+    x=1
+    temp =0
+    surface_var = 0
+    for i in range (0,thisNumSteps*2): # numSteps is upper bound by triangle inequality
+        # n1
+        if(locationOfRayEnd[1] >= 0 and x> 0):
+            index1=1
+        else:
+            index1 = getIndex(getDensity(-1*locationOfRayEnd[1]))
+
+        # add new coordinates of step
+        locationOfRayEnd = (locationOfRayEnd[0]+ np.sin(angle1)*thisStepSize,
+                            locationOfRayEnd[1]+ x*np.cos(angle1)*thisStepSize)
+        rayCoordH.append(locationOfRayEnd[0]*0.3048)
+        rayCoordV.append(locationOfRayEnd[1]*0.3048)
+
+        # n2
+        if(locationOfRayEnd[1] >= 0): #this is where i would like to put my x
+            index2=1
+        #angle2 = refractRay(index1,index2,angle1)
+
+            if(np.sin(angle1) > index2/index1): #if TIR condition met, theta1=theta2 and we move downward
+                surface_var +=1
+                x *=-1
+        
+        else: 
+            index2=getIndex(getDensity(-1*locationOfRayEnd[1]))
+            #print(angle1, angle2)
+        angle2 = refractRay(index1,index2,angle1)
+        if(angle2 >= 89*np.pi/180):
+            x = -1
+        if(np.isnan(angle2)):
+            return locationOfRayEnd[0], locationOfRayEnd[1], rayCoordH, rayCoordV, angle1
+    # if down sol, we count and allow ray to continue/reflect, else break
+        if(locationOfRayEnd[1] >= -1*thisDepthTx):
+            #if(whichSol == "D"):
+            count =1
+            #else:
+             #   if(whichSol =="N"):
+                    #print("2", temp, locationOfRayEnd[1], thisDepthTx)
+              #      return locationOfRayEnd[0], locationOfRayEnd[1], rayCoordH, rayCoordV, angle1
+    #breaks specific to down solution;
+    #break at some arbitrary height above surface, so we do not just continue up
+    #break when the ray comes back down
+        #if(whichSol == "D"):
+        if(locationOfRayEnd[1] >= 100):
+            return locationOfRayEnd[0], locationOfRayEnd[1], rayCoordH, rayCoordV, angle1
+        if(whichSol == "N"):
+            if(locationOfRayEnd[1] < -1*thisDepthTx and count ==1):
+                return locationOfRayEnd[0], locationOfRayEnd[1], rayCoordH, rayCoordV, angle1
+        elif(whichSol == "D"):
+            if(locationOfRayEnd[1] < -1*thisDepthTx and count ==1 and surface_var ==1):
+                return locationOfRayEnd[0], locationOfRayEnd[1], rayCoordH, rayCoordV, angle1
+
+        # reset theta1 to theta2
+        angle1 = angle2
+        temp +=1
+        # update total path length in ft. and time of flight in ns
+        totalPath=totalPath+thisStepSize #total path in ice
+        timeOfFlight=timeOfFlight+thisStepSize*index1*0.3048/3e8*1e9 #in ns
+    return locationOfRayEnd[0], locationOfRayEnd[1], rayCoordH, rayCoordV, angle1
+
+#------------------------------------------------------------------------------------------------------------------------------
+#find the ray that connects the Tx and Rx, try first using "normal" refracting propagation.  Note that 
+#in principle there could be 2 solutions, but this code right now only finds the first one, starting 
+#from zenith down
+#this code definitely works for two things below the ice, and may also work (I think it does but can't promise)
+#for a tx or rx above the surface (but not both)
+
+#the inputs:
+southPoleFlag=1; #1 for South Pole, 0 for Greenland, 2 for changeable model for testing
+depthRxm=[100] #depth in m of rx, positive number is below surface
+surfaceTxm=[5000] #distance across surface between tx and rx in m
+depthTxm=[700] #depth in m of tx, negative number for above-surface pulser, positive for below surface
+
+for k in range(0,len(depthRxm)): #swap tx and rx if needed so code doesn't break if Tx/Rx swapped
+    if depthRxm[k]<depthTxm[k]:
+        depthTxm1=depthTxm[k]
+        depthTxm[k]=depthRxm[k]
+        depthRxm[k]=depthTxm1
+
+depthRx=np.zeros(len(depthRxm))
+depthTx=np.zeros(len(depthTxm))
+surfaceTx=np.zeros(len(surfaceTxm))
+
+'''
+   surface Tx
+------------------
+|                |
+| depth          | depth Tx
+|   Rx
+|
+'''
+
+#convert to feet
+for k in range(0,len(depthRxm)):
+    depthRx[k]=depthRxm[k]*3.28
+    surfaceTx[k]=surfaceTxm[k]*3.28
+    depthTx[k]=depthTxm[k]*3.28
+
+#iterate to propagate the ray
+stepSize=5 #in feet
+totalPathAll=[]
+timeOfFlightAll=[]
+initialAngleAll=[]
+normalFlagAll=[]
+timeOfFlightDirAll=[] #direct straight line ray
+totalPathDirAll=[] #direct straight line ray
+
+for k in range(0,len(depthRx)):
+    normalRayFlag=0 #is it a normal ray, start this flag at 0.
+    print("****Trying Normal Ray Tracing...")
+    end = 90.0
+    start = 0.0
+    numSteps = 50000 # number of rays to estimate - larger is more accurate
+    stepSize = (surfaceTx[k] + abs(depthRx[k] - depthTx[k])) / numSteps # triangle inequality
+    
+    print("Step size:", stepSize)
+    while (end - start > 0.005 and start < end): 
+        j = (end + start) / 2.0
+        #print(start,j,end)
+        
+        # code
+        # ===============================================
+        final_x, final_y, rayCoordH_N,rayCoordV_N, angle1= propagateRay(j, depthRx[k], depthTx[k], stepSize, numSteps, "N")
+        # ========================================
+        
+        if (final_x > surfaceTx[k]):  #??
+            end = j
+            # rerun loop
+        else:
+            start = j
+            # rerun loop
+    #print(rayCoordH_N, rayCoordV_N)
+    if (final_y>=-1.*depthTx[k] and final_y<-1.*depthTx[k]+5):
+        normalRayFlag=1
+        #print("Ray Tracer Converged, Normal Mode")
+        print("Initial Angle Downhole: ", j, " Final Angle in Ice: ", angle1*180/np.pi)
+        #print("Horizontal Distance at End: ", locationOfRayEnd[0], " ft.")
+        #print("Horizontal Distance at End: ", locationOfRayEnd[0]/3.3, " m")
+
+        #print("Depth at End: ",locationOfRayEnd[1],"ft.")
+        #print("Time Of Flight Under Ice: ", timeOfFlight, " ns")
+        #print("Length of Path Under Ice: ", totalPath, " ft.")
+    else:
+        print("****Ray Tracer Did Not Converge with Normal Mode, there is no solution")
+    
+    #totalPathAll.append(totalPath)
+    #timeOfFlightAll.append(timeOfFlight)
+    normalFlagAll.append(normalRayFlag)
+    initialAngleAll.append(j)
+    
+    normalRayFlag=0 #is it a normal ray, start this flag at 0.
+    print("****Trying Down Ray Tracing...")
+    end = 90.0
+    start = 0.0
+    numSteps = 50000 # number of rays to estimate - larger is more accurate
+    stepSize = (surfaceTx[k] + abs(depthRx[k] - depthTx[k])) / numSteps # triangle inequality
+    
+        
+    minX = surfaceTx[k]
+    minRayCoordH = []
+    minRayCoordV = []
+    minAngle = 0
+    
+
+   
+    print("Step size:", stepSize)
+    #while (end - start > 0.005 and start < end): 
+    while ((minX > 1000) and (end - start > 0.005)): 
+        j = (end + start) / 2.0
+        
+        #print(start,j,end)
+        
+        # code
+        # ===============================================
+        final_x, final_y, rayCoordH,rayCoordV, angle1= propagateRay(j, depthRx[k], depthTx[k], stepSize, numSteps, "D")
+        # ========================================
+        xdist = abs(final_x - surfaceTx[k])
+        
+        if (xdist < minX) :
+            minX = xdist
+            minRayCoordH = rayCoordH
+            minRayCoordV = rayCoordV
+            minAngle = j
+        
+            
+        
+        if (final_x > surfaceTx[k]):  
+            end = j
+            # rerun loop
+        else:
+            start = j
+            # rerun loop
+            
+    
+    print("minimum x dist (ft): ", minX)
+    print("corresponding angle: ", minAngle)
+    
+    
+    
+    # ----------------------------------------------------------
+    
+    print("now stepping")
+    
+    for h in range(int((minAngle-1)*10),int((minAngle+1)*10)):
+        
+        # code
+        # ===============================================
+        final_x, final_y, rayCoordH,rayCoordV, angle1= propagateRay(h, depthRx[k], depthTx[k], stepSize, numSteps, "D")
+        # ========================================
+        xdist = abs(final_x - surfaceTx[k])
+        
+        if (xdist < minX) :
+            minX = xdist
+            minRayCoordH = rayCoordH
+            minRayCoordV = rayCoordV
+            minAngle = h
+            
+    
+    print("minimum x dist (ft): ", minX)
+    print("corresponding angle: ", minAngle)
+        
+
+ 
+    if (final_y>=-1.*depthTx[k] and final_y<-1.*depthTx[k]+5):
+        normalRayFlag=1
+        #print("Ray Tracer Converged, Normal Mode")
+        print("Initial Angle Downhole: ", j, " Final Angle in Ice: ", angle1*180/np.pi)
+        #print("Horizontal Distance at End: ", locationOfRayEnd[0], " ft.")
+        #print("Horizontal Distance at End: ", locationOfRayEnd[0]/3.3, " m")
+
+        #print("Depth at End: ",locationOfRayEnd[1],"ft.")
+        #print("Time Of Flight Under Ice: ", timeOfFlight, " ns")
+        #print("Length of Path Under Ice: ", totalPath, " ft.")
+    else:
+        print("****Ray Tracer Did Not Converge with Normal Mode, there is no solution")
+        print("Initial Angle Downhole: ", j, " Final Angle in Ice: ", angle1*180/np.pi)
+        #print("Horizontal Distance at End: ", locationOfRayEnd[0], " ft.")
+        #print("Horizontal Distance at End: ", locationOfRayEnd[0]/3.3, " m")
+ 
+        #print("Depth at End: ",locationOfRayEnd[1],"ft.")
+        #print("Depth at End: ",locationOfRayEnd[1]/3.3,"m")
+
+
+#H0=rayCoordH_S
+#V0=rayCoordV_S
+
+H1=rayCoordH_N
+V1=rayCoordV_N
+
+H2=minRayCoordH
+V2=minRayCoordV
+
+#--------------------------------------------------------------------------------------------------------------------
+#plot ray
+plt.figure(1)
+ax= plt.subplot(111)
+#ax.set_ylim(ymin=-200, ymax=-50)
+#ax.set_xlim(xmin=4800, xmax=5200)
+#plt.axhline(y=0)
+#plt.plot(H0,V0, linestyle=":", marker='.')
+plt.plot(H1,V1, linestyle=":", marker='.')
+plt.plot( H2,V2, linestyle=":", marker='.')
+plt.plot(surfaceTxm[0], -1*depthTxm[0], marker='o', markersize=3, color="black")
+#plt.plot(surfaceTxm[0], -1*depthTxm[1], marker='o', markersize=10, color="pink")
+#plt.plot(surfaceTxm[2], -1*depthTxm[2], marker='o', markersize=10, color="purple")
+plt.show()
